@@ -6,7 +6,7 @@ import shutil
 import sys
 from ansi import *
 from collections import deque
-from signal import signal, SIGWINCH
+from signal import signal, SIGWINCH, SIG_IGN
 from utils import printf
 
 
@@ -22,8 +22,7 @@ class Application:
         self.queued_keys = []
         self.command_keys = []
         self.running = False
-        signal(SIGWINCH, self.redraw)
-        self.redraw()
+        self.update_dimensions()
 
     ##################
     # Public Methods #
@@ -50,16 +49,18 @@ class Application:
         self.render_messages()
 
     def run(self):
-        try:
-            with terminal.raw_mode():
-                self.running = True
-                self.on_startup()
+        with terminal.raw_mode():
+            self.running = True
+            signal(SIGWINCH, self.redraw)
+            self.on_startup()
+            try:
                 while self.running:
                     self.render_prompt()
                     self.on_keypress(self.getkey())
-                self.on_exit()
-        except (KeyboardInterrupt, EOFError):
-            pass
+            except KeyboardInterrupt:
+                pass
+            self.on_exit()
+            signal(SIGWINCH, SIG_IGN)
 
     def getkey(self):
         if self.queued_keys:
