@@ -42,6 +42,7 @@ LOAD_CURSOR = '\x1B[u'
 SHOW_CURSOR = '\x1B[?25h'
 HIDE_CURSOR = '\x1B[?25l'
 
+CLEAR_LINE = '\x1B[2K'
 CLEAR_SCREEN = '\x1B[2J'
 ALTERNATE_SCREEN = '\x1B[?1049h'
 RESTORE_SCREEN = '\x1B[?1049l'
@@ -54,3 +55,19 @@ def BG_RGB(red, green, blue):
 
 def POSITION_CURSOR(row, column):
     return '\x1B[{};{}H'.format(row, column)
+
+ESCAPE_KEY = '\x1B'
+CSI = '\x1B['
+
+ANSI_CONTROL_SEQUENCES = {
+    'A': 'UP',
+    'B': 'DOWN',
+    'C': 'RIGHT',
+    'D': 'LEFT',
+    '1': 'HOME',
+    '2': 'INSERT',
+    '3': 'DELETE',
+    '4': 'END',
+    '5': 'PAGE UP',
+    '6': 'PAGE DOWN'
+}
