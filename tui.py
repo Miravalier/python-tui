@@ -7,16 +7,17 @@ import sys
 from ansi import *
 from collections import deque
 from utils import printf
-from select import select
 
 
 class Application:
     translation_table = str.maketrans('\n\t', '  ')
 
-    def __init__(self, *, message_history=1024, command_history=1024, prompt=' > '):
+    def __init__(self, *, message_history=1024, command_history=1024,
+            prompt=' > ', error_prefix=('error:', FG_RED)):
         self.messages = deque(maxlen=message_history)
         self.commands = deque(maxlen=command_history)
         self.prompt = prompt
+        self.error_prefix = error_prefix
         self.update_dimensions()
         self.queued_keys = []
         self.command_keys = []
@@ -107,7 +108,7 @@ class Application:
             try:
                 args = self.command_args
             except ValueError as e:
-                self.print(('error:', FG_RED), e)
+                self.print(self.error_prefix, e)
                 self.command_keys = []
                 return
             self.on_command(args)
@@ -141,7 +142,7 @@ class Application:
         if not args:
             return
         # All commands are unrecognized by default
-        self.print("Unrecognized command {}".format(repr(args[0])))
+        self.print(self.error_prefix, "unrecognized command {}".format(repr(args[0])))
 
     def on_tab(self, args):
         pass
