@@ -6,6 +6,7 @@ import shutil
 import sys
 from ansi import *
 from collections import deque
+from signal import signal, SIGWINCH
 from utils import printf
 
 
@@ -18,17 +19,11 @@ class Application:
         self.commands = deque(maxlen=command_history)
         self.prompt = prompt
         self.error_prefix = error_prefix
-        self.update_dimensions()
         self.queued_keys = []
         self.command_keys = []
-
-    @property
-    def command_string(self):
-        return ''.join(self.command_keys)
-
-    @property
-    def command_args(self):
-        return shlex.split(self.command_string)
+        self.running = False
+        signal(SIGWINCH, self.redraw)
+        self.redraw()
 
     ##################
     # Public Methods #
@@ -52,15 +47,17 @@ class Application:
         # Append the message to the deque
         self.messages.appendleft(message)
         # Re-render all messages
-        self.update_dimensions()
         self.render_messages()
 
     def run(self):
         try:
             with terminal.raw_mode():
-                while True:
+                self.running = True
+                self.on_startup()
+                while self.running:
                     self.render_prompt()
                     self.on_keypress(self.getkey())
+                self.on_exit()
         except (KeyboardInterrupt, EOFError):
             pass
 
@@ -103,8 +100,8 @@ class Application:
             return key
 
     def on_keypress(self, key):
-        # On enter, run on_command and clear the command
-        if key == '\n':
+        # On enter or CTRL+D, run on_command and clear the command
+        if key == '\n' or key == '\x04':
             try:
                 args = self.command_args
             except ValueError as e:
@@ -117,7 +114,9 @@ class Application:
         elif key == '\t':
             try:
                 args = self.command_args
+                self.command_keys = list(shlex.join(args))
             except ValueError as e:
+                #self.print(self.error_prefix, e)
                 return
             self.on_tab(args)
         # On backspace, pop a character
@@ -129,6 +128,28 @@ class Application:
         # On CTRL+C, clear the current command
         elif key == 'SIGINT':
             self.command_keys = []
+        # Arrow keys
+        elif key == 'LEFT':
+            pass
+        elif key == 'RIGHT':
+            pass
+        elif key == 'UP':
+            pass
+        elif key == 'DOWN':
+            pass
+        # Special Keys
+        elif key == 'INSERT':
+            pass
+        elif key == 'HOME':
+            pass
+        elif key == 'DELETE':
+            pass
+        elif key == 'END':
+            pass
+        elif key == 'PAGE UP':
+            pass
+        elif key == 'PAGE DOWN':
+            pass
         # On any other key, add it to the current command
         else:
             self.command_keys.append(key)
@@ -137,22 +158,45 @@ class Application:
     # Abstract Methods #
     ####################
 
+    def on_startup(self):
+        # By default do nothing
+        pass
+
     def on_command(self, args):
         # If no args were entered, print an empty line
         if not args:
+            self.print()
             return
         # All commands are unrecognized by default
         self.print(self.error_prefix, "unrecognized command {}".format(repr(args[0])))
 
     def on_tab(self, args):
+        # By default do nothing
+        pass
+
+    def on_exit(self):
+        # By default do nothing
         pass
 
     ####################
     # Internal Methods #
     ####################
 
+    @property
+    def command_string(self):
+        return ''.join(self.command_keys)
+
+    @property
+    def command_args(self):
+        return shlex.split(self.command_string)
+
+    def redraw(self, *args):
+        self.update_dimensions()
+        self.render_messages()
+        self.render_prompt()
+
     def row_length(self, message):
-        return math.ceil(sum(len(part) for part, attributes in message) / self.columns)
+        return max(math.ceil(sum(len(part) for part, attributes in message) / self.columns), 1)
 
     def construct_part(self, part):
         if isinstance(part, (tuple, list)):
@@ -185,8 +229,6 @@ class Application:
             printf(POSITION_CURSOR(current_row, 1))
             columns_written = 0
             for part, attributes in message:
-                if not part:
-                    continue
                 if attributes:
                     printf(attributes, part, SGR_RESET)
                 else:
