@@ -6,7 +6,9 @@ import shutil
 import sys
 from ansi import *
 from collections import deque
+from datetime import datetime
 from signal import signal, SIGWINCH, SIG_IGN
+from typing import List
 from utils import printf
 
 
@@ -14,37 +16,51 @@ class Application:
     translation_table = str.maketrans('\n\t', '  ')
 
     def __init__(self, *, message_history=1024, command_history=1024,
-            prompt=' > ', error_prefix=('error:', FG_RED)):
+            prompt=' > ', error_prefix=('error:', FG_RED),
+            timestamp_format='%d-%b-%Y %H:%M:%S '):
         self.messages = deque(maxlen=message_history)
         self.commands = deque(maxlen=command_history)
+        self.command_index = 0
+        self.cursor_index = 0
         self.prompt = prompt
         self.error_prefix = error_prefix
         self.queued_keys = []
         self.command_keys = []
         self.running = False
         self.update_dimensions()
+        self.timestamp_format = timestamp_format
 
     ##################
     # Public Methods #
     ##################
 
+    def stop(self):
+        self.running = False
+
     def clear(self):
         self.messages.clear()
 
+    def error(self, *args, **kwargs):
+        self.print(self.error_prefix, *args, **kwargs)
+
     def print(self, *parts, sep=' ', end=''):
         # Construct the separator and end string
-        sep = self.construct_part(sep)
-        end = self.construct_part(end)
+        sep = self.construct_tuple(sep)
+        end = self.construct_tuple(end)
         # Assemble the message
         message = []
+        if self.timestamp_format:
+            message.append((datetime.now().strftime(self.timestamp_format), None))
         for i in range(len(parts)-1):
-            message.append(self.construct_part(parts[i]))
+            message.append(self.construct_tuple(parts[i]))
             message.append(sep)
         if parts:
-            message.append(self.construct_part(parts[-1]))
+            message.append(self.construct_tuple(parts[-1]))
         message.append(end)
         # Append the message to the deque
         self.messages.appendleft(message)
+        # Trigger on_print on the message
+        self.on_print(sep[0].join(part for part, attributes in message) + end[0])
         # Re-render all messages
         self.render_messages()
 
@@ -69,8 +85,7 @@ class Application:
             try:
                 key = sys.stdin.read(1)
             except KeyboardInterrupt:
-                #return 'SIGINT'
-                raise
+                return 'SIGINT'
 
         # If an escape key is pressed
         if key == ESCAPE_KEY:
@@ -100,88 +115,197 @@ class Application:
         else:
             return key
 
-    def on_keypress(self, key):
-        # On enter or CTRL+D, run on_command and clear the command
-        if key == '\n' or key == '\x04':
-            try:
-                args = self.command_args
-            except ValueError as e:
-                self.print(self.error_prefix, e)
-                self.command_keys = []
-                return
-            self.on_command(args)
+    def on_enter(self):
+        try:
+            args = self.command_args
+        except ValueError as e:
+            self.print(self.error_prefix, e)
             self.command_keys = []
-        # On tab, run on_tab
+            return
+        if args:
+            self.on_command(args)
+        else:
+            self.messages.appendleft([])
+            self.render_messages()
+        saved_command = shlex.join(args)
+        if saved_command and (not self.commands or self.commands[0] != saved_command):
+            self.commands.appendleft(saved_command)
+        self.command_keys = []
+        self.command_index = 0
+        self.cursor_index = 0
+    
+    def on_backspace(self):
+        if self.cursor_index == 0:
+            return
+        self.command_keys.pop(self.cursor_index - 1)
+        self.cursor_index -= 1
+
+    def on_delete(self):
+        if self.cursor_index < len(self.command_keys) - 1:
+            self.command_keys.pop(self.cursor_index)
+
+    def on_escape(self):
+        self.command_keys = []
+        self.cursor_index = 0
+        self.command_index = 0
+
+    def on_left(self):
+        self.cursor_index -= 1
+
+    def on_right(self):
+        self.cursor_index += 1
+
+    def on_up(self):
+        if not self.commands or self.command_index == len(self.commands):
+            return
+        self.command_index += 1
+        self.command_keys = list(self.commands[self.command_index - 1])
+        self.cursor_index = len(self.command_keys)
+
+    def on_down(self):
+        if not self.commands or self.command_index == 0:
+            return
+        self.command_index -= 1
+        if self.command_index == 0:
+            self.command_keys = []
+        else:
+            self.command_keys = list(self.commands[self.command_index - 1])
+        self.cursor_index = len(self.command_keys)
+
+    def on_insert(self):
+        pass
+
+    def on_home(self):
+        self.cursor_index = 0
+
+    def on_end(self):
+        self.cursor_index = len(self.command_keys)
+
+    def on_sigint(self):
+        self.stop()
+
+    def on_keypress(self, key):
+        # Enter or CTRL+D
+        if key == '\n' or key == '\x04':
+            self.on_enter()
+        # Tab
         elif key == '\t':
             try:
                 args = self.command_args
-                self.command_keys = list(shlex.join(args))
             except ValueError as e:
-                #self.print(self.error_prefix, e)
                 return
+            self.command_keys = list(shlex.join(args))
             self.on_tab(args)
-        # On backspace, pop a character
+        # Backspace
         elif key == '\x7F':
-            try:
-                self.command_keys.pop()
-            except IndexError:
-                pass
-        # On CTRL+C, clear the current command
+            self.on_backspace()
+        # CTRL+C
         elif key == 'SIGINT':
-            self.command_keys = []
+            self.on_sigint()
         # Arrow keys
         elif key == 'LEFT':
-            pass
+            self.on_left()
         elif key == 'RIGHT':
-            pass
+            self.on_right()
         elif key == 'UP':
-            pass
+            self.on_up()
         elif key == 'DOWN':
-            pass
-        # Special Keys
-        elif key == 'INSERT':
-            pass
-        elif key == 'HOME':
-            pass
+            self.on_down()
+        # Special keys
         elif key == 'DELETE':
-            pass
-        elif key == 'END':
-            pass
-        elif key == 'PAGE UP':
-            pass
-        elif key == 'PAGE DOWN':
-            pass
-        # On any other key, add it to the current command
+            self.on_delete()
+        elif key == 'INSERT':
+            self.on_insert()
+        elif key == 'HOME' or key == 'PAGE UP':
+            self.on_home()
+        elif key == 'END' or key == 'PAGE DOWN':
+            self.on_end()
+        elif key == 'ESCAPE':
+            self.on_escape()
+        # Any other printable key
+        elif key.isprintable():
+            self.on_printable(key)
+        # Any other misc key
         else:
-            self.command_keys.append(key)
+            self.on_misc(key)
+        # Bound cursor index
+        if self.cursor_index < 0:
+            self.cursor_index = 0
+        elif self.cursor_index > len(self.command_keys):
+            self.cursor_index = len(self.command_keys)
+
+    def on_printable(self, key):
+        self.command_keys.insert(self.cursor_index, key)
+        self.cursor_index += 1
+
+    def on_misc(self, key):
+        pass
 
     ####################
     # Abstract Methods #
     ####################
 
-    def on_startup(self):
-        # By default do nothing
+    def on_print(self, s: str) -> None:
+        """
+        Abstract method. Called whenever a print() call is made.
+    
+        s   --  The fully assembled string generated by the print call
+                without any attributes like color.
+        """
         pass
 
-    def on_command(self, args):
-        # If no args were entered, print an empty line
-        if not args:
-            self.print()
-            return
-        # All commands are unrecognized by default
-        self.print(self.error_prefix, "unrecognized command {}".format(repr(args[0])))
-
-    def on_tab(self, args):
-        # By default do nothing
+    def on_startup(self) -> None:
+        """
+        Abstract method. Called exactly once, when the application is started
+        by calling the run() function.
+        """
         pass
 
-    def on_exit(self):
-        # By default do nothing
+    def on_command(self, args: List[str]) -> None:
+        """
+        Abstract method. Called when a command is submitted by pressing enter.
+        This function is intended to be used to implement the main logic of the
+        application.
+
+        args    --  A list of string arguments entered.
+        """
+        pass
+
+    def on_tab(self, args: List[str]) -> None:
+        """
+        Abstract method. Called when tab is pressed, intended to be
+        used to implement tab-complete functionality.
+        
+        args    --  A list of string arguments entered so far.
+        """
+        pass
+
+    def on_exit(self) -> None:
+        """
+        Abstract method. Called exactly once, when the application is ending because
+        the stop() function has been called.
+        """
         pass
 
     ####################
     # Internal Methods #
     ####################
+
+    @property
+    def error_prefix(self):
+        return self._error_prefix
+
+    @error_prefix.setter
+    def error_prefix(self, value):
+        self._error_prefix = self.construct_tuple(value)
+
+    @property
+    def prompt(self):
+        return self._prompt
+
+    @prompt.setter
+    def prompt(self, value):
+        self._prompt = self.construct_tuple(value)
 
     @property
     def command_string(self):
@@ -199,11 +323,9 @@ class Application:
     def row_length(self, message):
         return max(math.ceil(sum(len(part) for part, attributes in message) / self.columns), 1)
 
-    def construct_part(self, part):
-        if isinstance(part, (tuple, list)):
-            if len(part) != 2:
-                raise TypeError("print requires strings or (string, attribute) tuples")
-            return (self.construct_string(part[0]), part[1])
+    def construct_tuple(self, part):
+        if isinstance(part, tuple) and len(part) == 2:
+            return (self.construct_string(part[0]), self.construct_string(part[1]))
         else:
             return (self.construct_string(part), None)
 
@@ -216,6 +338,8 @@ class Application:
         self.rows = rows
 
     def render_messages(self):
+        if self.rows < 2:
+            return
         # Hide cursor
         printf(HIDE_CURSOR)
         # Start cursor on the prompt row
@@ -240,8 +364,38 @@ class Application:
         printf(SHOW_CURSOR)
 
     def render_prompt(self):
-        # Move cursor to the prompt row, erase the old line, display prompt and current command
-        printf(POSITION_CURSOR(self.rows, 1), CLEAR_LINE, self.prompt, self.command_string)
+        prompt, attributes = self.prompt
+        usable_columns = self.columns - (len(prompt) + 1)
+        if usable_columns < 7:
+            return
+        command = self.command_string
+        cursor_index = self.cursor_index
+        # Truncate the command if necessary
+        if len(command) > usable_columns:
+            left_bound = min(max(cursor_index - usable_columns // 2, 0), len(command) - usable_columns)
+            right_bound = left_bound + usable_columns
+            command = (
+                command[left_bound:cursor_index]
+                +
+                command[cursor_index:right_bound]
+            )
+            cursor_index -= left_bound
+        printf(
+            # Move the cursor to the prompt row
+            POSITION_CURSOR(self.rows, 1),
+            # Erase the old prompt
+            CLEAR_LINE,
+            # Set the prompt attributes
+            attributes if attributes else "",
+            # Display the prompt
+            prompt,
+            # Reset the cursor attributes
+            SGR_RESET if attributes else "",
+            # Display the current typed command
+            command,
+            # Move the cursor to the cursor index
+            POSITION_CURSOR(self.rows, len(prompt) + cursor_index + 1)
+        )
 
 
 if __name__ == '__main__':
