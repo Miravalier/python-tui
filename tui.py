@@ -5,7 +5,7 @@ import shlex
 import shutil
 import sys
 from ansi import *
-from collections import deque
+from collections import deque, namedtuple
 from datetime import datetime
 from signal import signal, SIGWINCH, SIG_IGN
 from typing import List
@@ -311,9 +311,17 @@ class Application:
     def command_string(self):
         return ''.join(self.command_keys)
 
+    @command_string.setter
+    def command_string(self, value):
+        self.command_keys = list(value)
+
     @property
     def command_args(self):
         return shlex.split(self.command_string)
+
+    @command_args.setter
+    def command_args(self, value):
+        self.command_keys = list(shlex.join(value))
 
     def redraw(self, *args):
         self.update_dimensions()
@@ -398,5 +406,71 @@ class Application:
         )
 
 
+LocalCommand = namedtuple('LocalCommand', ('name', 'callback', 'help', 'on_tab'))
+
+
+class LocalApplication(Application):
+    def __init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
+        self.commands = {}
+        self.add_command('help', lambda app, args: self.print('TODO'), aliases=['?'])
+        self.add_command('exit', lambda app, args: self.stop(), aliases=['quit'])
+
+    def add_command(self, name, callback, *, aliases=(), help=None, on_tab=None):
+        '''
+        Add a command to the application.
+
+        name        --  Primary name of the command.
+
+        callback    --  Function to be called when this command is entered. Signature:
+                        callback(application: LocalApplication, args: List[str])
+
+        aliases     --  List of alternate accepted names.
+
+        help        --  String that displays when 'help <command>' is entered.
+
+        on_tab      --  Function to be called when tab is pressed and this command is
+                        the first argument. Signature:
+                        on_tab(application: LocalApplication, args: List[str])
+        '''
+        command = LocalCommand(name, callback, help, on_tab)
+        self.commands[name] = command
+        for alias in aliases:
+            self.commands[alias] = command
+
+    def command_complete(self, command):
+        matches = [c for c in self.commands if c.startswith(command)]
+        if len(matches) == 1:
+            self.command_string = matches[0]
+        elif len(matches) > 1:
+            self.print(*matches, sep='  ')
+
+    def on_command(self, args):
+        command, *args = args
+        if command in self.commands:
+            command = self.commands[command]
+        else:
+            self.error("unrecognized command '{}'".format(command))
+            return
+        command.callback(self, args)
+
+    def on_tab(self, args):
+        command, *args = args
+        if command in self.commands:
+            command = self.commands[command]
+        else:
+            if not args:
+                self.command_complete(command)
+            return
+        if command.on_tab:
+            command.on_tab(self, args)
+
+
+class ExampleApplication(LocalApplication):
+    def __init__(self):
+        super().__init__()
+        self.add_command('')
+
+
 if __name__ == '__main__':
-    Application().run()
+    LocalApplication().run()
