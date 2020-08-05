@@ -7,6 +7,7 @@ import sys
 from ansi import *
 from collections import deque, namedtuple
 from datetime import datetime
+from parser import ArgumentError
 from signal import signal, SIGWINCH, SIG_IGN
 from typing import List
 from utils import printf
@@ -19,7 +20,7 @@ class Application:
             prompt=' > ', error_prefix=('error:', FG_RED),
             timestamp_format='%d-%b-%Y %H:%M:%S '):
         self.messages = deque(maxlen=message_history)
-        self.commands = deque(maxlen=command_history)
+        self.command_history = deque(maxlen=command_history)
         self.command_index = 0
         self.cursor_index = 0
         self.prompt = prompt
@@ -104,7 +105,8 @@ class Application:
                 try:
                     key = ANSI_CONTROL_SEQUENCES[key]
                 except KeyError:
-                    key = "Unrecognized Code '{}'".format(key)
+                    #key = "Unrecognized Code '{}'".format(key)
+                    return None
                 with terminal.nonblocking_mode():
                     while sys.stdin.read(1): pass
                 return key
@@ -128,8 +130,8 @@ class Application:
             self.messages.appendleft([])
             self.render_messages()
         saved_command = shlex.join(args)
-        if saved_command and (not self.commands or self.commands[0] != saved_command):
-            self.commands.appendleft(saved_command)
+        if saved_command and (not self.command_history or self.command_history[0] != saved_command):
+            self.command_history.appendleft(saved_command)
         self.command_keys = []
         self.command_index = 0
         self.cursor_index = 0
@@ -156,20 +158,20 @@ class Application:
         self.cursor_index += 1
 
     def on_up(self):
-        if not self.commands or self.command_index == len(self.commands):
+        if not self.command_history or self.command_index == len(self.command_history):
             return
         self.command_index += 1
-        self.command_keys = list(self.commands[self.command_index - 1])
+        self.command_keys = list(self.command_history[self.command_index - 1])
         self.cursor_index = len(self.command_keys)
 
     def on_down(self):
-        if not self.commands or self.command_index == 0:
+        if not self.command_history or self.command_index == 0:
             return
         self.command_index -= 1
         if self.command_index == 0:
             self.command_keys = []
         else:
-            self.command_keys = list(self.commands[self.command_index - 1])
+            self.command_keys = list(self.command_history[self.command_index - 1])
         self.cursor_index = len(self.command_keys)
 
     def on_insert(self):
@@ -185,6 +187,9 @@ class Application:
         self.stop()
 
     def on_keypress(self, key):
+        # Ignore None
+        if key is None:
+            return
         # Enter or CTRL+D
         if key == '\n' or key == '\x04':
             self.on_enter()
@@ -409,11 +414,12 @@ class Application:
 LocalCommand = namedtuple('LocalCommand', ('name', 'callback', 'help', 'on_tab'))
 
 
-class LocalApplication(Application):
-    def __init__(self, *args, **kwargs)
+class Interpreter(Application):
+    def __init__(self, *args, allow_abbreviations=True, **kwargs):
         super().__init__(*args, **kwargs)
+        self.allow_abbreviations = allow_abbreviations
         self.commands = {}
-        self.add_command('help', lambda app, args: self.print('TODO'), aliases=['?'])
+        self.add_command('help', lambda app, args: self.print('TODO'))
         self.add_command('exit', lambda app, args: self.stop(), aliases=['quit'])
 
     def add_command(self, name, callback, *, aliases=(), help=None, on_tab=None):
@@ -423,7 +429,7 @@ class LocalApplication(Application):
         name        --  Primary name of the command.
 
         callback    --  Function to be called when this command is entered. Signature:
-                        callback(application: LocalApplication, args: List[str])
+                        callback(application: Interpreter, args: List[str])
 
         aliases     --  List of alternate accepted names.
 
@@ -431,7 +437,7 @@ class LocalApplication(Application):
 
         on_tab      --  Function to be called when tab is pressed and this command is
                         the first argument. Signature:
-                        on_tab(application: LocalApplication, args: List[str])
+                        on_tab(application: Interpreter, args: List[str])
         '''
         command = LocalCommand(name, callback, help, on_tab)
         self.commands[name] = command
@@ -442,6 +448,7 @@ class LocalApplication(Application):
         matches = [c for c in self.commands if c.startswith(command)]
         if len(matches) == 1:
             self.command_string = matches[0]
+            self.cursor_index = len(self.command_keys)
         elif len(matches) > 1:
             self.print(*matches, sep='  ')
 
@@ -450,11 +457,29 @@ class LocalApplication(Application):
         if command in self.commands:
             command = self.commands[command]
         else:
-            self.error("unrecognized command '{}'".format(command))
-            return
-        command.callback(self, args)
+            if self.allow_abbreviations:
+                matches = [c for c in self.commands if c.startswith(command)]
+                if len(matches) == 0:
+                    self.error("unrecognized command '{}'".format(command))
+                    return
+                elif len(matches) == 1:
+                    command = self.commands[matches[0]]
+                else:
+                    self.error("ambiguous command:", *matches, sep='  ')
+                    return
+            else:
+                self.error("unrecognized command '{}'".format(command))
+                return
+
+        try:
+            command.callback(self, args)
+        except Exception as e:
+            self.error(str(type(e)) + ':', e)
 
     def on_tab(self, args):
+        if not args:
+            self.command_complete('')
+            return
         command, *args = args
         if command in self.commands:
             command = self.commands[command]
@@ -463,14 +488,20 @@ class LocalApplication(Application):
                 self.command_complete(command)
             return
         if command.on_tab:
-            command.on_tab(self, args)
+            try:
+                command.on_tab(self, args)
+            except Exception as e:
+                self.error('exception during tab complete:', type(e), e)
 
+    @staticmethod
+    def do_alias(application, args):
+        if len(args) != 2:
+            raise ArgumentError('usage: alias <new name> <existing command>')
 
-class ExampleApplication(LocalApplication):
+class ExampleApplication(Interpreter):
     def __init__(self):
         super().__init__()
-        self.add_command('')
 
 
 if __name__ == '__main__':
-    LocalApplication().run()
+    ExampleApplication().run()
