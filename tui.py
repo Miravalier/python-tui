@@ -7,7 +7,7 @@ import sys
 from ansi import *
 from collections import deque, namedtuple
 from datetime import datetime
-from parser import ArgumentError
+from parser import Parser, ArgumentError
 from signal import signal, SIGWINCH, SIG_IGN
 from typing import List
 from utils import printf
@@ -411,7 +411,31 @@ class Application:
         )
 
 
-LocalCommand = namedtuple('LocalCommand', ('name', 'callback', 'help', 'on_tab'))
+class LocalCommand:
+    def __init__(self, name, callback, help, on_tab):
+        self.name = name
+        self.callback = callback
+        self.help = help
+        self.on_tab = on_tab
+        self.parser = Parser(add_help=False)
+
+    def add_argument(self, *args, **kwargs):
+        self.parser.add_argument(*args, **kwargs)
+
+    @property
+    def usage(self):
+        result = 'usage: {}'.format(self.name)
+        for action in self.parser._actions:
+            if action.nargs == '?':
+                result += ' [{}]'.format(action.dest)
+            elif action.nargs == '*':
+                result += ' [{} ...]'.format(action.dest)
+            elif action.nargs == '+':
+                result += ' <{} ...>'.format(action.dest)
+            else:
+                result += ' <{}>'.format(action.dest)
+        return result
+
 
 
 class Interpreter(Application):
@@ -419,8 +443,29 @@ class Interpreter(Application):
         super().__init__(*args, **kwargs)
         self.allow_abbreviations = allow_abbreviations
         self.commands = {}
-        self.add_command('help', lambda app, args: self.print('TODO'))
-        self.add_command('exit', lambda app, args: self.stop(), aliases=['quit'])
+        self.add_default_commands()
+
+    def add_default_commands(self):
+        alias_command = self.add_command(
+            'alias',
+            self.do_alias,
+            help='Create a shortcut for a command.'
+        )
+        alias_command.add_argument('new_name')
+        alias_command.add_argument('existing_command')
+
+        help_command = self.add_command(
+            'help',
+            self.do_help,
+            help='Display this help messsage.'
+        )
+        help_command.add_argument('command', nargs='?')
+
+        exit_command = self.add_command(
+            'exit',
+            lambda args: self.stop(),
+            aliases=['quit']
+        )
 
     def add_command(self, name, callback, *, aliases=(), help=None, on_tab=None):
         '''
@@ -429,7 +474,7 @@ class Interpreter(Application):
         name        --  Primary name of the command.
 
         callback    --  Function to be called when this command is entered. Signature:
-                        callback(application: Interpreter, args: List[str])
+                        callback(args: List[str])
 
         aliases     --  List of alternate accepted names.
 
@@ -437,12 +482,13 @@ class Interpreter(Application):
 
         on_tab      --  Function to be called when tab is pressed and this command is
                         the first argument. Signature:
-                        on_tab(application: Interpreter, args: List[str])
+                        on_tab(args: List[str])
         '''
         command = LocalCommand(name, callback, help, on_tab)
         self.commands[name] = command
         for alias in aliases:
             self.commands[alias] = command
+        return command
 
     def command_complete(self, command):
         matches = [c for c in self.commands if c.startswith(command)]
@@ -465,16 +511,20 @@ class Interpreter(Application):
                 elif len(matches) == 1:
                     command = self.commands[matches[0]]
                 else:
-                    self.error("ambiguous command:", *matches, sep='  ')
+                    self.error("ambiguous command:", '  '.join(matches))
                     return
             else:
                 self.error("unrecognized command '{}'".format(command))
                 return
 
         try:
-            command.callback(self, args)
-        except Exception as e:
-            self.error(str(type(e)) + ':', e)
+            args = command.parser.parse_args(args)
+            command.callback(args)
+        except ArgumentError as e:
+            self.error(command.usage)
+            e = str(e)
+            if e:
+                self.error(e)
 
     def on_tab(self, args):
         if not args:
@@ -489,14 +539,24 @@ class Interpreter(Application):
             return
         if command.on_tab:
             try:
-                command.on_tab(self, args)
+                command.on_tab(args)
             except Exception as e:
-                self.error('exception during tab complete:', type(e), e)
+                self.error('exception during tab complete:', type(e).__name__ + ':', e)
 
-    @staticmethod
-    def do_alias(application, args):
+    def do_help(self, args):
+        if args.command:
+            for command in self.commands.values():
+                self.print(command.name + ':', command.help)
+                self.print()
+
+    def do_alias(self, args):
         if len(args) != 2:
-            raise ArgumentError('usage: alias <new name> <existing command>')
+            raise ArgumentError()
+        new, existing = args
+        if existing not in self.commands:
+            raise ArgumentError('{} is not a command that exists'.format(existing))
+        self.commands[new] = self.commands[existing]
+
 
 class ExampleApplication(Interpreter):
     def __init__(self):
