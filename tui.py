@@ -14,11 +14,10 @@ from utils import printf
 
 
 class Application:
-    translation_table = str.maketrans('\n\t', '  ')
+    translation_table = str.maketrans('\t\n', '  ')
 
     def __init__(self, *, message_history=1024, command_history=1024,
-            prompt=' > ', error_prefix=('error:', FG_RED),
-            timestamp_format='%d-%b-%Y %H:%M:%S '):
+            prompt=('$ ', FG_CYAN), error_prefix=('error:', FG_RED)):
         self.messages = deque(maxlen=message_history)
         self.command_history = deque(maxlen=command_history)
         self.command_index = 0
@@ -29,7 +28,6 @@ class Application:
         self.command_keys = []
         self.running = False
         self.update_dimensions()
-        self.timestamp_format = timestamp_format
 
     ##################
     # Public Methods #
@@ -50,8 +48,6 @@ class Application:
         end = self.construct_tuple(end)
         # Assemble the message
         message = []
-        if self.timestamp_format:
-            message.append((datetime.now().strftime(self.timestamp_format), None))
         for i in range(len(parts)-1):
             message.append(self.construct_tuple(parts[i]))
             message.append(sep)
@@ -124,6 +120,7 @@ class Application:
             self.print(self.error_prefix, e)
             self.command_keys = []
             return
+        self.print(self.prompt, self.command_string, sep='')
         if args:
             self.on_command(args)
         else:
@@ -199,7 +196,6 @@ class Application:
                 args = self.command_args
             except ValueError as e:
                 return
-            self.command_keys = list(shlex.join(args))
             self.on_tab(args)
         # Backspace
         elif key == '\x7F':
@@ -322,7 +318,8 @@ class Application:
 
     @property
     def command_args(self):
-        return shlex.split(self.command_string)
+        args = shlex.split(self.command_string)
+        return args
 
     @command_args.setter
     def command_args(self, value):
@@ -333,7 +330,7 @@ class Application:
         self.render_messages()
         self.render_prompt()
 
-    def row_length(self, message):
+    def count_lines(self, message):
         return max(math.ceil(sum(len(part) for part, attributes in message) / self.columns), 1)
 
     def construct_tuple(self, part):
@@ -359,7 +356,7 @@ class Application:
         current_row = self.rows
         for message in self.messages:
             # Calculate how many rows will be needed for this message
-            current_row -= self.row_length(message)
+            current_row -= self.count_lines(message)
             # Stop once we reach the top of the terminal
             if current_row < 1:
                 break
@@ -412,62 +409,97 @@ class Application:
 
 
 class LocalCommand:
-    def __init__(self, name, callback, help, on_tab):
+    def __init__(self, name, callback, help, examples=()):
         self.name = name
         self.callback = callback
         self.help = help
-        self.on_tab = on_tab
         self.parser = Parser(add_help=False)
+        self.parameter_domains = {}
+        self.examples = examples
+        self.has_optional_arguments = False
 
-    def add_argument(self, *args, **kwargs):
-        self.parser.add_argument(*args, **kwargs)
+    def add_argument(self, name, *, required=True, choices=None, help=None):
+        if not required:
+            self.has_optional_arguments = True
+
+        if required and self.has_optional_arguments:
+            raise ValueError("Required arguments can't be added after optional arguments.")
+        
+        if callable(choices):
+            self.parameter_domains[name] = choices
+            choices = None
+
+        self.parser.add_argument(
+            name,
+            nargs=(None if required else '?'),
+            choices=choices,
+            help=help
+        )
+
+    @property
+    def parameters(self):
+        return self.parser._actions
+
+    @property
+    def argument_string(self):
+        args = []
+        for action in self.parameters:
+            if action.nargs == '?':
+                args.append('[{}]'.format(action.dest))
+            elif action.nargs == '*':
+                args.append('[{} ...]'.format(action.dest))
+            elif action.nargs == '+':
+                args.append('<{} ...>'.format(action.dest))
+            else:
+                args.append('<{}>'.format(action.dest))
+        return " ".join(args)
 
     @property
     def usage(self):
-        result = 'usage: {}'.format(self.name)
-        for action in self.parser._actions:
-            if action.nargs == '?':
-                result += ' [{}]'.format(action.dest)
-            elif action.nargs == '*':
-                result += ' [{} ...]'.format(action.dest)
-            elif action.nargs == '+':
-                result += ' <{} ...>'.format(action.dest)
-            else:
-                result += ' <{}>'.format(action.dest)
-        return result
+        return "{} {}".format(self.name, self.argument_string)
 
 
 
 class Interpreter(Application):
-    def __init__(self, *args, allow_abbreviations=True, **kwargs):
+    def __init__(self, *args, allow_abbreviations=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.allow_abbreviations = allow_abbreviations
         self.commands = {}
         self.add_default_commands()
 
     def add_default_commands(self):
+        help_command = self.add_command(
+            'help',
+            self.do_help,
+            help='List available commands or get detailed information on a command.',
+            examples=('help alias', 'help exit')
+        )
+        help_command.add_argument(
+            'command',
+            required=False,
+            choices=lambda: self.commands.keys(),
+            help='Command to display more info for.'
+        )
+
+        exit_command = self.add_command(
+            'exit',
+            lambda args: self.stop(),
+            aliases=['quit'],
+            help='Close the application.'
+        )
+
         alias_command = self.add_command(
             'alias',
             self.do_alias,
             help='Create a shortcut for a command.'
         )
         alias_command.add_argument('new_name')
-        alias_command.add_argument('existing_command')
-
-        help_command = self.add_command(
-            'help',
-            self.do_help,
-            help='Display this help messsage.'
-        )
-        help_command.add_argument('command', nargs='?')
-
-        exit_command = self.add_command(
-            'exit',
-            lambda args: self.stop(),
-            aliases=['quit']
+        alias_command.add_argument(
+            'existing_command', choices=lambda: self.commands.keys(),
+            help='An existing command to create an alias for.'
         )
 
-    def add_command(self, name, callback, *, aliases=(), help=None, on_tab=None):
+    def add_command(self, name, callback, *, aliases=(), help=None, examples=()):
         '''
         Add a command to the application.
 
@@ -480,23 +512,38 @@ class Interpreter(Application):
 
         help        --  String that displays when 'help <command>' is entered.
 
-        on_tab      --  Function to be called when tab is pressed and this command is
-                        the first argument. Signature:
-                        on_tab(args: List[str])
+        examples    --  List of strings that display when 'help <command>' is entered.
         '''
-        command = LocalCommand(name, callback, help, on_tab)
+        command = LocalCommand(name, callback, help, examples)
         self.commands[name] = command
         for alias in aliases:
             self.commands[alias] = command
         return command
 
-    def command_complete(self, command):
-        matches = [c for c in self.commands if c.startswith(command)]
+    @property
+    def has_trailing_space(self):
+        if self.command_keys and self.command_keys[-1].isspace():
+            return True
+        return False
+
+    def argument_index(self, args):
+        if not args:
+            return 0
+
+        index = len(args) - 1
+
+        if self.has_trailing_space:
+            index += 1
+
+        return index
+            
+
+    def command_complete(self, command, commands):
+        matches = [c for c in commands if c.startswith(command)]
         if len(matches) == 1:
-            self.command_string = matches[0]
-            self.cursor_index = len(self.command_keys)
-        elif len(matches) > 1:
-            self.print(*matches, sep='  ')
+            return matches[0]
+        else:
+            return matches
 
     def on_command(self, args):
         command, *args = args
@@ -521,46 +568,128 @@ class Interpreter(Application):
             args = command.parser.parse_args(args)
             command.callback(args)
         except ArgumentError as e:
-            self.error(command.usage)
+            self.print(('usage:', FG_YELLOW), command.usage)
             e = str(e)
             if e:
                 self.error(e)
 
     def on_tab(self, args):
+        # If no text is present, display all commands
         if not args:
-            self.command_complete('')
+            self.print(*self.commands.keys(), sep='  ')
             return
+
         command, *args = args
-        if command in self.commands:
-            command = self.commands[command]
-        else:
+
+        # If no args are present and this command does not exist,
+        # try to complete it
+        if command not in self.commands:
             if not args:
-                self.command_complete(command)
+                match = self.command_complete(command, self.commands)
+                if isinstance(match, list):
+                    self.print(*match, sep='  ')
+                else:
+                    self.command_string = match + ' '
+                    self.cursor_index = len(self.command_keys)
             return
-        if command.on_tab:
-            try:
-                command.on_tab(args)
-            except Exception as e:
-                self.error('exception during tab complete:', type(e).__name__ + ':', e)
+
+        command = self.commands[command]
+        argument_index = self.argument_index(args)
+
+        # If this command does not take parameters
+        if not command.parameters:
+            return
+
+        # If more arguments are provided than parameters
+        if argument_index >= len(command.parameters):
+            self.print(command.usage)
+            return
+
+        # Define which action and argument to tab complete
+        action = command.parameters[argument_index]
+
+        # If args are provided and there is no trailing space,
+        # the arg is the last arg in the list. Otherwise it is
+        # an empty string.
+        if args and not self.has_trailing_space:
+            arg = args[-1]
+        else:
+            arg = ''
+
+        # If choices are defined for this action
+        if action.choices:
+            domain = action.choices
+        # If this action has a defined domain function
+        elif action.dest in command.parameter_domains:
+            domain = command.parameter_domains[action.dest]()
+        else:
+            domain = None
+
+        # If the domain exists, either from an iterable or function
+        if domain:
+            # Find which choices match the given argument
+            match = self.command_complete(arg, domain)
+            # If there are multiple matches, print them
+            if isinstance(match, list):
+                self.print(*match, sep='  ')
+            # If there is just one match, add it to the command line
+            else:
+                if self.has_trailing_space:
+                    self.command_args = self.command_args + [match]
+                else:
+                    args = self.command_args
+                    args[-1] = match
+                    self.command_args = args
+                    self.cursor_index = len(self.command_keys)
+            return
+
+        # Fallback if no better methods resolve
+        self.print(command.usage)
 
     def do_help(self, args):
-        if args.command:
-            for command in self.commands.values():
-                self.print(command.name + ':', command.help)
+        self.print()
+        if not args.command:
+            result = []
+            for command in set(self.commands.values()):
+                self.print((command.name, FG_BRIGHT_CYAN), command.argument_string)
+                if command.help:
+                    self.print('  {}'.format(command.help))
                 self.print()
+        else:
+            if args.command not in self.commands:
+                raise ArgumentError("unrecognized command '{}'".format(args.command))
+                return
+            command = self.commands[args.command]
+            if command.help:
+                self.print('description:')
+                self.print('   ', command.help)
+                self.print()
+            self.print("usage:")
+            self.print('   ', (command.name, FG_BRIGHT_CYAN), command.argument_string)
+            if command.parameters:
+                self.print()
+                self.print("parameters:")
+                for parameter in command.parameters:
+                    if parameter.help:
+                        self.print('   ', parameter.dest + ':', parameter.help)
+                    else:
+                        self.print('   ', parameter.dest)
+            if command.examples:
+                self.print()
+                self.print("examples:")
+                for example in command.examples:
+                    self.print('   ', example)
+            self.print()
+            
 
     def do_alias(self, args):
-        if len(args) != 2:
-            raise ArgumentError()
-        new, existing = args
-        if existing not in self.commands:
-            raise ArgumentError('{} is not a command that exists'.format(existing))
-        self.commands[new] = self.commands[existing]
+        if args.existing_command not in self.commands:
+            raise ArgumentError("unrecognized command '{}'".format(args.existing_command))
+        self.commands[args.new_name] = self.commands[args.existing_command]
 
 
 class ExampleApplication(Interpreter):
-    def __init__(self):
-        super().__init__()
+    pass
 
 
 if __name__ == '__main__':
